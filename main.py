@@ -1,3 +1,5 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import numpy as np
 import argparse
 import torch
@@ -6,15 +8,21 @@ from copy import deepcopy
 from option_critic import OptionCriticFeatures, OptionCriticConv
 from option_critic import critic_loss as critic_loss_fn
 from option_critic import actor_loss as actor_loss_fn
+from soft_option_critic import SoftOptionCriticFeatures, SoftOptionCriticConv
+from soft_option_critic import critic_loss as critic_loss_Soft_fn
+from soft_option_critic import actor_loss as actor_loss_Soft_fn
 
 from experience_replay import ReplayBuffer
 from utils import make_env, to_tensor
 from logger import Logger
+from datetime import datetime
+from collections import deque
 
 import time
 
 parser = argparse.ArgumentParser(description="Option Critic PyTorch")
 parser.add_argument('--env', default='CartPole-v0', help='ROM to run')
+parser.add_argument('--model', default='option_critic', help='Model to use: option_critic | soft_option_critic') 
 parser.add_argument('--optimal-eps', type=float, default=0.05, help='Epsilon when playing optimally')
 parser.add_argument('--frame-skip', default=4, type=int, help='Every how many frames to process')
 parser.add_argument('--learning-rate',type=float, default=.0005, help='Learning rate')
@@ -42,21 +50,40 @@ parser.add_argument('--switch-goal', type=bool, default=False, help='switch goal
 def run(args):
     env, is_atari = make_env(args.env)
     option_critic = OptionCriticConv if is_atari else OptionCriticFeatures
+    soft_option_critic = SoftOptionCriticConv if is_atari else SoftOptionCriticFeatures
     device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
+    print(f"Using device: {device}")
 
-    option_critic = option_critic(
-        in_features=env.observation_space.shape[0],
-        num_actions=env.action_space.n,
-        num_options=args.num_options,
-        temperature=args.temp,
-        eps_start=args.epsilon_start,
-        eps_min=args.epsilon_min,
-        eps_decay=args.epsilon_decay,
-        eps_test=args.optimal_eps,
-        device=device
-    )
-    # Create a prime network for more stable Q values
-    option_critic_prime = deepcopy(option_critic)
+    if args.model == 'option_critic':
+
+        option_critic = option_critic(
+            in_features=env.observation_space.shape[0],
+            num_actions=env.action_space.n,
+            num_options=args.num_options,
+            temperature=args.temp,
+            eps_start=args.epsilon_start,
+            eps_min=args.epsilon_min,
+            eps_decay=args.epsilon_decay,
+            eps_test=args.optimal_eps,
+            device=device
+        )
+        # Create a prime network for more stable Q values
+        option_critic_prime = deepcopy(option_critic)
+
+    else:
+        option_critic = soft_option_critic(
+            in_features=env.observation_space.shape[0],
+            num_actions=env.action_space.n,
+            num_options=args.num_options,
+            temperature=args.temp,
+            eps_start=args.epsilon_start,
+            eps_min=args.epsilon_min,
+            eps_decay=args.epsilon_decay,
+            eps_test=args.optimal_eps,
+            device=device
+        )
+        # Create a prime network for more stable Q values
+        option_critic_prime = deepcopy(option_critic)
 
     optim = torch.optim.RMSprop(option_critic.parameters(), lr=args.learning_rate)
 
@@ -65,9 +92,12 @@ def run(args):
     env.seed(args.seed)
 
     buffer = ReplayBuffer(capacity=args.max_history, seed=args.seed)
-    logger = Logger(logdir=args.logdir, run_name=f"{OptionCriticFeatures.__name__}-{args.env}-{args.exp}-{time.ctime()}")
-
+    if args.model == 'option_critic':
+        logger = Logger(logdir=args.logdir, run_name=f"{OptionCriticFeatures.__name__}-{args.env}-{args.exp}-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
+    else:
+        logger = Logger(logdir=args.logdir, run_name=f"{SoftOptionCriticFeatures.__name__}-{args.env}-{args.exp}-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
     steps = 0 ;
+    recent_rewards = deque(maxlen=100)
     if args.switch_goal: print(f"Current goal {env.goal}")
     while steps < args.max_steps_total:
 
@@ -82,16 +112,26 @@ def run(args):
         # 2k episodes. In option-critic, if the options have some meaning, only the policy-over-options
         # should be finedtuned (this is what we would hope).
         if args.switch_goal and logger.n_eps == 1000:
-            torch.save({'model_params': option_critic.state_dict(),
-                        'goal_state': env.goal},
-                        f'models/option_critic_seed={args.seed}_1k')
+            if args.model == 'option_critic':
+                torch.save({'model_params': option_critic.state_dict(),
+                            'goal_state': env.goal},
+                            f'models/option_critic_seed={args.seed}_1k')
+            else:
+                torch.save({'model_params': option_critic.state_dict(),
+                            'goal_state': env.goal},
+                            f'models/soft_option_critic_seed={args.seed}_1k')
             env.switch_goal()
             print(f"New goal {env.goal}")
 
         if args.switch_goal and logger.n_eps > 2000:
-            torch.save({'model_params': option_critic.state_dict(),
-                        'goal_state': env.goal},
-                        f'models/option_critic_seed={args.seed}_2k')
+            if args.model == 'option_critic':
+                torch.save({'model_params': option_critic.state_dict(),
+                            'goal_state': env.goal},
+                            f'models/option_critic_seed={args.seed}_2k')
+            else:
+                torch.save({'model_params': option_critic.state_dict(),
+                            'goal_state': env.goal},
+                            f'models/soft_option_critic_seed={args.seed}_2k')
             break
 
         done = False ; ep_steps = 0 ; option_termination = True ; curr_op_len = 0
@@ -111,13 +151,20 @@ def run(args):
 
             actor_loss, critic_loss = None, None
             if len(buffer) > args.batch_size:
-                actor_loss = actor_loss_fn(obs, current_option, logp, entropy, \
+                if args.model == 'option_critic':
+                    actor_loss = actor_loss_fn(obs, current_option, logp, entropy,\
                     reward, done, next_obs, option_critic, option_critic_prime, args)
+                else:
+                    actor_loss = actor_loss_Soft_fn(obs, current_option, logp, entropy, \
+                        reward, done, next_obs, option_critic, option_critic_prime, args)
                 loss = actor_loss
 
                 if steps % args.update_frequency == 0:
                     data_batch = buffer.sample(args.batch_size)
-                    critic_loss = critic_loss_fn(option_critic, option_critic_prime, data_batch, args)
+                    if args.model == 'option_critic':
+                        critic_loss = critic_loss_fn(option_critic, option_critic_prime, data_batch, args)
+                    else:
+                        critic_loss = critic_loss_Soft_fn(option_critic, option_critic_prime, data_batch, args)
                     loss += critic_loss
 
                 optim.zero_grad()
@@ -137,6 +184,22 @@ def run(args):
             obs = next_obs
 
             logger.log_data(steps, actor_loss, critic_loss, entropy.item(), epsilon)
+        if args.env == 'CartPole-v0':
+            recent_rewards.append(rewards)
+            if len(recent_rewards) == 100:
+                avg_reward = np.mean(recent_rewards)
+                print(f"Average reward last 100 eps: {avg_reward:.3f}")
+                if avg_reward >= 195.0:
+                    print("Environment solved in CartPole-v0!")
+                    if args.model == 'option_critic':
+                        torch.save({'model_params': option_critic.state_dict()},
+                               f'models/option_critic_cartpole_solved')
+                    else:
+                        torch.save({'model_params': option_critic.state_dict()},
+                               f'models/soft_option_critic_cartpole_solved')
+                    break
+            
+        
 
         logger.log_episode(steps, rewards, option_lengths, ep_steps, epsilon)
 
