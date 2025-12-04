@@ -37,9 +37,9 @@ def make_env(env_name):
 
     if env_name == 'fourrooms':
         return Fourrooms(), False
-
+    print(f"Creating environment: {env_name}")
     env = gym.make(env_name)
-    is_atari = hasattr(gym.envs, 'atari') and isinstance(env.unwrapped, gym.envs.atari.atari_env.AtariEnv)
+    is_atari = hasattr(gym.envs, 'atari') and isinstance(env.unwrapped, gym.envs.atari.AtariEnv)
     if is_atari:
         env = AtariPreprocessing(env, grayscale_obs=True, scale_obs=True, terminal_on_life_loss=True)
         env = TransformReward(env, lambda r: np.clip(r, -1, 1))

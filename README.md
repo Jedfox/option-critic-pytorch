@@ -25,4 +25,5 @@ python main.py --switch-goal True --env fourrooms
 pytorch>=1.12.1
 tensorboard>=2.0.2
 gym>=0.15.3
+numpy<2.0
 ```

@@ -43,14 +43,17 @@ parser.add_argument('--max_steps_ep', type=int, default=18000, help='number of m
 parser.add_argument('--max_steps_total', type=int, default=int(4e6), help='number of maximum steps to take.') # bout 4 million
 parser.add_argument('--cuda', type=bool, default=True, help='Enable CUDA training (recommended if possible).')
 parser.add_argument('--seed', type=int, default=0, help='Random seed for numpy, torch, random.')
-parser.add_argument('--logdir', type=str, default='runs', help='Directory for logging statistics')
+parser.add_argument('--logdir', type=str, default='scratch/runs', help='Directory for logging statistics')
 parser.add_argument('--exp', type=str, default=None, help='optional experiment name')
 parser.add_argument('--switch-goal', type=bool, default=False, help='switch goal after 2k eps')
 
+
 def run(args):
     env, is_atari = make_env(args.env)
+    is_atari = 'NoFrameskip' in args.env or 'ALE/' in args.env or 'Seaquest' in args.env
     option_critic = OptionCriticConv if is_atari else OptionCriticFeatures
     soft_option_critic = SoftOptionCriticConv if is_atari else SoftOptionCriticFeatures
+    print(f"CUDA Available: {torch.cuda.is_available()}")
     device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
     print(f"Using device: {device}")
 
@@ -89,9 +92,15 @@ def run(args):
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    env.seed(args.seed)
+    if args.env != "LunarLander-v2":
+        env.seed(args.seed)
 
     buffer = ReplayBuffer(capacity=args.max_history, seed=args.seed)
+    if is_atari:
+        best_reward = -float('inf')
+        patience = 0
+        patience_limit = 500000
+        patience_start = 3000000
     if args.model == 'option_critic':
         logger = Logger(logdir=args.logdir, run_name=f"{OptionCriticFeatures.__name__}-{args.env}-{args.exp}-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
     else:
@@ -104,6 +113,8 @@ def run(args):
         rewards = 0 ; option_lengths = {opt:[] for opt in range(args.num_options)}
 
         obs   = env.reset()
+        if isinstance(obs, tuple):
+            obs = obs[0]
         state = option_critic.get_state(to_tensor(obs))
         greedy_option  = option_critic.greedy_option(state)
         current_option = 0
@@ -115,11 +126,11 @@ def run(args):
             if args.model == 'option_critic':
                 torch.save({'model_params': option_critic.state_dict(),
                             'goal_state': env.goal},
-                            f'models/option_critic_seed={args.seed}_1k')
+                            f'scratch/models/option_critic_seed={args.seed}_1k')
             else:
                 torch.save({'model_params': option_critic.state_dict(),
                             'goal_state': env.goal},
-                            f'models/soft_option_critic_seed={args.seed}_1k')
+                            f'scratch/models/soft_option_critic_seed={args.seed}_1k')
             env.switch_goal()
             print(f"New goal {env.goal}")
 
@@ -127,11 +138,11 @@ def run(args):
             if args.model == 'option_critic':
                 torch.save({'model_params': option_critic.state_dict(),
                             'goal_state': env.goal},
-                            f'models/option_critic_seed={args.seed}_2k')
+                            f'scratch/models/option_critic_seed={args.seed}_2k')
             else:
                 torch.save({'model_params': option_critic.state_dict(),
                             'goal_state': env.goal},
-                            f'models/soft_option_critic_seed={args.seed}_2k')
+                            f'scratch/models/soft_option_critic_seed={args.seed}_2k')
             break
 
         done = False ; ep_steps = 0 ; option_termination = True ; curr_op_len = 0
@@ -145,7 +156,12 @@ def run(args):
     
             action, logp, entropy = option_critic.get_action(state, current_option)
 
-            next_obs, reward, done, _ = env.step(action)
+            step_result = env.step(action)
+            if len(step_result) == 5:
+                next_obs, reward, terminated, truncated, _ = step_result
+                done = terminated or truncated
+            else:
+                next_obs, reward, done, _ = step_result
             buffer.push(obs, current_option, reward, next_obs, done)
             rewards += reward
 
@@ -182,25 +198,63 @@ def run(args):
             ep_steps += 1
             curr_op_len += 1
             obs = next_obs
+            
+            if steps % 10000 == 0:
+                print(steps, rewards)
 
             logger.log_data(steps, actor_loss, critic_loss, entropy.item(), epsilon)
-        if args.env == 'CartPole-v0':
+        if args.env == 'CartPole-v0' or args.env == "LunarLander-v2":
             recent_rewards.append(rewards)
             if len(recent_rewards) == 100:
                 avg_reward = np.mean(recent_rewards)
                 print(f"Average reward last 100 eps: {avg_reward:.3f}")
-                if avg_reward >= 195.0:
-                    print("Environment solved in CartPole-v0!")
+                if args.env == 'CartPole-v0':
+                    if avg_reward >= 195.0:
+                        print("Environment solved in CartPole-v0!")
+                        if args.model == 'option_critic':
+                            torch.save({'model_params': option_critic.state_dict()},
+                                   f'scratch/models/option_critic_cartpole_solved')
+                        else:
+                            torch.save({'model_params': option_critic.state_dict()},
+                                   f'scratch/models/soft_option_critic_cartpole_solved')
+                        break
+                if args.env == 'LunarLander-v2':
+                    if avg_reward >= 250.0:
+                        print("Environment solved in LunarLander-v2!")
+                        if args.model == 'option_critic':
+                            torch.save({'model_params': option_critic.state_dict()},
+                                   f'scratch/models/option_critic_lunarlander_solved')
+                        else:
+                            torch.save({'model_params': option_critic.state_dict()},
+                                   f'scratch/models/soft_option_critic_lunarlander_solved')
+                        break
+        elif is_atari:
+            recent_rewards.append(rewards)
+            if len(recent_rewards)  == 100 and steps >= patience_start:
+                avg_reward = np.mean(recent_rewards)
+                if avg_reward > best_reward:
+                    best_reward = rewards
+                    patience = 0
+                else:
+                    patience += ep_steps
+                if patience >= patience_limit:
+                    print("Environment solved in Atari!")
                     if args.model == 'option_critic':
                         torch.save({'model_params': option_critic.state_dict()},
-                               f'models/option_critic_cartpole_solved')
+                                    f'scratch/models/option_critic_{args.env}_solved')
                     else:
                         torch.save({'model_params': option_critic.state_dict()},
-                               f'models/soft_option_critic_cartpole_solved')
+                                    f'scratch/models/soft_option_critic_{args.env}_solved')
                     break
-            
         
-
+        if steps >= args.max_steps_total:
+                    print("Step Limit Reach")
+                    if args.model == 'option_critic':
+                        torch.save({'model_params': option_critic.state_dict()},
+                                    f'scratch/models/option_critic_{args.env}_{steps}')
+                    else:
+                        torch.save({'model_params': option_critic.state_dict()},
+                                    f'scratch/models/soft_option_critic_{args.env}_{steps}')
         logger.log_episode(steps, rewards, option_lengths, ep_steps, epsilon)
 
 if __name__=="__main__":
