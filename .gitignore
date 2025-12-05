@@ -8,5 +8,4 @@
 settings.json
 .pylintrc
 *.pyc
-runs/*
 analysis/*
