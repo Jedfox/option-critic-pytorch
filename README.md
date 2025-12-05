@@ -21,7 +21,7 @@ To use the SOC architecture change flag to soft_option_critic
 This is a more complex continous control environment. It tests option diversification and training under limited step count. To run it enter command below:
 
 ```
-python main.py --model option_critic --env LunarLander-v2 --num_options 4 --max_steps_total 500000
+python main.py --model option_critic --env LunarLander-v2 --num-options 4 --max_steps_total 500000
 ```
 To use the SOC architecture change flag to soft_option_critic
 
