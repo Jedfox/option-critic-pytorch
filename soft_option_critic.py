@@ -91,7 +91,6 @@ class SoftOptionCriticConv(nn.Module):
             logits = (state.unsqueeze(1) @ weights).squeeze(1) + bias
         else:
             # Single Mode: (1, Features) @ (Features, Actions)
-            # [CRITICAL CHANGE]: Removed .data to allow gradient flow
             logits = state @ self.options_W[option] + self.options_b[option]
         action_dist = (logits / self.temperature).softmax(dim=-1)
         action_dist = Categorical(action_dist)
@@ -195,7 +194,6 @@ class SoftOptionCriticFeatures(nn.Module):
             logits = (state.unsqueeze(1) @ weights).squeeze(1) + bias
         else:
             # Single Mode: (1, Features) @ (Features, Actions)
-            # [CRITICAL CHANGE]: Removed .data to allow gradient flow
             logits = state @ self.options_W[option] + self.options_b[option]
         action_dist = (logits / self.temperature).softmax(dim=-1)
         action_dist = Categorical(action_dist)
